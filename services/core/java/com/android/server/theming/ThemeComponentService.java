@@ -17,9 +17,12 @@
 
 package com.android.server.theming;
 
+import static android.content.pm.ThemeUtils.MODIFIES_ALARMS;
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
 import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
+import static android.content.pm.ThemeUtils.MODIFIES_NOTIFICATIONS;
+import static android.content.pm.ThemeUtils.MODIFIES_RINGTONES;
 
 import android.Manifest;
 import android.annotation.NonNull;
@@ -29,6 +32,8 @@ import android.app.ActivityManager;
 import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -45,8 +50,10 @@ import android.content.res.IThemeService;
 import android.content.res.Resources;
 import android.content.res.ThemeChangeRequest;
 import android.content.res.ThemeConfig;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
+import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Environment;
@@ -57,7 +64,10 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
+import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.os.UserManager;
+import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
@@ -102,7 +112,8 @@ import java.util.function.Predicate;
  * <ul>
  *     <li>App icon packs are turned into one fabricated overlay per app replacing its icon, so
  *     the regular resource stack and launchers pick them up.</li>
- *     <li>Wallpapers go through the {@link WallpaperManager}.</li>
+ *     <li>Wallpapers go through the {@link WallpaperManager}, sounds through the
+ *     {@link MediaStore} and {@link RingtoneManager}.</li>
  * </ul>
  */
 public final class ThemeComponentService extends SystemService {
@@ -209,6 +220,30 @@ public final class ThemeComponentService extends SystemService {
                     WallpaperManager.FLAG_LOCK, ThemeUtils.LOCKSCREEN_WALLPAPER_PATH,
                     ThemeChangeRequest.DEFAULT_WALLPAPER_ID)) {
                 failed.add(MODIFIES_LOCKSCREEN);
+            }
+            incrementProgress(progressIncrement);
+        }
+
+        if (requested.containsKey(MODIFIES_RINGTONES)) {
+            if (!updateAudible(userId, requested.get(MODIFIES_RINGTONES),
+                    RingtoneManager.TYPE_RINGTONE)) {
+                failed.add(MODIFIES_RINGTONES);
+            }
+            incrementProgress(progressIncrement);
+        }
+
+        if (requested.containsKey(MODIFIES_NOTIFICATIONS)) {
+            if (!updateAudible(userId, requested.get(MODIFIES_NOTIFICATIONS),
+                    RingtoneManager.TYPE_NOTIFICATION)) {
+                failed.add(MODIFIES_NOTIFICATIONS);
+            }
+            incrementProgress(progressIncrement);
+        }
+
+        if (requested.containsKey(MODIFIES_ALARMS)) {
+            if (!updateAudible(userId, requested.get(MODIFIES_ALARMS),
+                    RingtoneManager.TYPE_ALARM)) {
+                failed.add(MODIFIES_ALARMS);
             }
             incrementProgress(progressIncrement);
         }
@@ -455,6 +490,144 @@ public final class ThemeComponentService extends SystemService {
         }
     }
 
+    private boolean updateAudible(@UserIdInt int userId, @Nullable String pkgName, int type) {
+        if (!mContext.getSystemService(UserManager.class).isUserUnlocked(userId)) {
+            Slog.w(TAG, "Cannot change sounds while user " + userId + " is locked");
+            return false;
+        }
+        final Context userContext = getContextForUser(userId);
+        final Uri uri = ThemeUtils.isSystemDefault(pkgName)
+                ? getDefaultAudible(userContext, type)
+                : installThemeAudible(userContext, userId, pkgName, type);
+        if (uri == null) {
+            return false;
+        }
+        RingtoneManager.setActualDefaultRingtoneUri(userContext, type, uri);
+        return true;
+    }
+
+    /** @return the media uri of the sound the build ships as default for the given type. */
+    @Nullable
+    private static Uri getDefaultAudible(@NonNull Context userContext, int type) {
+        final String property;
+        switch (type) {
+            case RingtoneManager.TYPE_ALARM:
+                property = "ro.config.alarm_alert";
+                break;
+            case RingtoneManager.TYPE_NOTIFICATION:
+                property = "ro.config.notification_sound";
+                break;
+            default:
+                property = "ro.config.ringtone";
+                break;
+        }
+        final String name = SystemProperties.get(property);
+        if (TextUtils.isEmpty(name)) {
+            return null;
+        }
+        try (Cursor c = userContext.getContentResolver().query(
+                MediaStore.Audio.Media.INTERNAL_CONTENT_URI,
+                new String[] {MediaStore.MediaColumns._ID},
+                MediaStore.MediaColumns.DISPLAY_NAME + "=?", new String[] {name}, null)) {
+            if (c != null && c.moveToFirst()) {
+                return MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_INTERNAL,
+                        c.getLong(0));
+            }
+        }
+        Slog.w(TAG, "Default sound " + name + " not found");
+        return null;
+    }
+
+    /** Copies the theme's sound into the user's shared storage and returns its media uri. */
+    @Nullable
+    private Uri installThemeAudible(@NonNull Context userContext, @UserIdInt int userId,
+            @NonNull String pkgName, int type) {
+        final String assetDir;
+        final String mediaDir;
+        final String typeColumn;
+        switch (type) {
+            case RingtoneManager.TYPE_ALARM:
+                assetDir = ThemeUtils.ALARMS_PATH;
+                mediaDir = Environment.DIRECTORY_ALARMS;
+                typeColumn = MediaStore.Audio.Media.IS_ALARM;
+                break;
+            case RingtoneManager.TYPE_NOTIFICATION:
+                assetDir = ThemeUtils.NOTIFICATIONS_PATH;
+                mediaDir = Environment.DIRECTORY_NOTIFICATIONS;
+                typeColumn = MediaStore.Audio.Media.IS_NOTIFICATION;
+                break;
+            default:
+                assetDir = ThemeUtils.RINGTONES_PATH;
+                mediaDir = Environment.DIRECTORY_RINGTONES;
+                typeColumn = MediaStore.Audio.Media.IS_RINGTONE;
+                break;
+        }
+
+        try {
+            final Context themeContext = getThemeContext(userId, pkgName);
+            final String[] assets = themeContext.getAssets().list(assetDir);
+            String asset = null;
+            if (assets != null) {
+                Arrays.sort(assets);
+                for (String candidate : assets) {
+                    if (candidate.endsWith(".ogg") || candidate.endsWith(".mp3")) {
+                        asset = candidate;
+                        break;
+                    }
+                }
+            }
+            if (asset == null) {
+                Slog.w(TAG, pkgName + " has no " + assetDir);
+                return null;
+            }
+
+            final ContentResolver resolver = userContext.getContentResolver();
+            final Uri collection =
+                    MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+            final String relativePath = mediaDir + File.separator;
+            final String displayName = pkgName + "_" + asset;
+
+            // Reuse the copy made by an earlier application of this theme
+            try (Cursor c = resolver.query(collection, new String[] {MediaStore.MediaColumns._ID},
+                    MediaStore.MediaColumns.RELATIVE_PATH + "=? AND "
+                            + MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                    new String[] {relativePath, displayName}, null)) {
+                if (c != null && c.moveToFirst()) {
+                    return MediaStore.Audio.Media.getContentUri(
+                            MediaStore.VOLUME_EXTERNAL_PRIMARY, c.getLong(0));
+                }
+            }
+
+            final ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+            values.put(MediaStore.MediaColumns.MIME_TYPE,
+                    asset.endsWith(".ogg") ? "audio/ogg" : "audio/mpeg");
+            values.put(typeColumn, 1);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            final Uri uri = resolver.insert(collection, values);
+            if (uri == null) {
+                return null;
+            }
+            try (InputStream in = themeContext.getAssets().open(
+                    assetDir + File.separator + asset);
+                    OutputStream out = resolver.openOutputStream(uri)) {
+                FileUtils.copy(in, out);
+            } catch (IOException e) {
+                resolver.delete(uri, null, null);
+                throw e;
+            }
+            values.clear();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            resolver.update(uri, values, null, null);
+            return uri;
+        } catch (IOException | PackageManager.NameNotFoundException
+                | IllegalArgumentException | IllegalStateException e) {
+            Slog.e(TAG, "Unable to install sound from " + pkgName, e);
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------------------------------
     // Package and user changes
 
@@ -586,6 +759,12 @@ public final class ThemeComponentService extends SystemService {
                 return getWallpaperMarker(userId, WallpaperManager.FLAG_SYSTEM);
             case MODIFIES_LOCKSCREEN:
                 return getWallpaperMarker(userId, WallpaperManager.FLAG_LOCK);
+            case MODIFIES_RINGTONES:
+                return getAudibleMarker(userId, RingtoneManager.TYPE_RINGTONE);
+            case MODIFIES_NOTIFICATIONS:
+                return getAudibleMarker(userId, RingtoneManager.TYPE_NOTIFICATION);
+            case MODIFIES_ALARMS:
+                return getAudibleMarker(userId, RingtoneManager.TYPE_ALARM);
             default:
                 return null;
         }
@@ -595,6 +774,12 @@ public final class ThemeComponentService extends SystemService {
     private String getWallpaperMarker(@UserIdInt int userId, int which) {
         return String.valueOf(getContextForUser(userId).getSystemService(WallpaperManager.class)
                 .getWallpaperIdForUser(which, userId));
+    }
+
+    @NonNull
+    private String getAudibleMarker(@UserIdInt int userId, int type) {
+        return String.valueOf(
+                RingtoneManager.getActualDefaultRingtoneUri(getContextForUser(userId), type));
     }
 
     /**
@@ -608,6 +793,9 @@ public final class ThemeComponentService extends SystemService {
                 return areIconOverlaysEnabled(userId);
             case MODIFIES_LAUNCHER:
             case MODIFIES_LOCKSCREEN:
+            case MODIFIES_RINGTONES:
+            case MODIFIES_NOTIFICATIONS:
+            case MODIFIES_ALARMS:
                 return Objects.equals(state.markers.get(component),
                         getComponentMarker(userId, component));
             default:
