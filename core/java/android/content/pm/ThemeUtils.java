@@ -62,6 +62,9 @@ public final class ThemeUtils {
     public static final String LEGACY_META_TAG_NAME = "org.cyanogenmod.theme.name";
     public static final String LEGACY_META_TAG_AUTHOR = "org.cyanogenmod.theme.author";
 
+    /** Overlay category for SystemUI overlays that only theme the navigation bar. */
+    public static final String OVERLAY_CATEGORY_NAVBAR = "org.lineageos.theme.navbar";
+
     // Theme components. The values match the cm-13.0 ThemesContract so that
     // existing theme choosers can keep using them.
     public static final String MODIFIES_LAUNCHER = "mods_homescreen";
@@ -72,10 +75,13 @@ public final class ThemeUtils {
     public static final String MODIFIES_ALARMS = "mods_alarms";
     public static final String MODIFIES_RINGTONES = "mods_ringtones";
     public static final String MODIFIES_OVERLAYS = "mods_overlays";
+    public static final String MODIFIES_STATUS_BAR = "mods_status_bar";
+    public static final String MODIFIES_NAVIGATION_BAR = "mods_navigation_bar";
 
     private static final List<String> ALL_COMPONENTS = Collections.unmodifiableList(Arrays.asList(
             MODIFIES_LAUNCHER, MODIFIES_LOCKSCREEN, MODIFIES_ICONS, MODIFIES_BOOT_ANIM,
-            MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES, MODIFIES_OVERLAYS));
+            MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES, MODIFIES_OVERLAYS,
+            MODIFIES_STATUS_BAR, MODIFIES_NAVIGATION_BAR));
 
     // Asset paths inside a theme package
     public static final String WALLPAPER_PATH = "wallpapers";
