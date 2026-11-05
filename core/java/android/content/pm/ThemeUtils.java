@@ -37,6 +37,7 @@ import java.util.List;
  * assets:
  * <ul>
  *     <li>{@code assets/wallpapers/*} - home screen wallpaper(s)</li>
+ *     <li>{@code assets/lockscreen/*} - lock screen wallpaper</li>
  *     <li>{@code assets/appfilter.xml} or {@code res/xml/appfilter.xml} - icon pack</li>
  * </ul>
  *
@@ -56,13 +57,15 @@ public final class ThemeUtils {
     // Theme components. The values match the cm-13.0 ThemesContract so that
     // existing theme choosers can keep using them.
     public static final String MODIFIES_LAUNCHER = "mods_homescreen";
+    public static final String MODIFIES_LOCKSCREEN = "mods_lockscreen";
     public static final String MODIFIES_ICONS = "mods_icons";
 
     private static final List<String> ALL_COMPONENTS = Collections.unmodifiableList(Arrays.asList(
-            MODIFIES_LAUNCHER, MODIFIES_ICONS));
+            MODIFIES_LAUNCHER, MODIFIES_LOCKSCREEN, MODIFIES_ICONS));
 
     // Asset paths inside a theme package
     public static final String WALLPAPER_PATH = "wallpapers";
+    public static final String LOCKSCREEN_WALLPAPER_PATH = "lockscreen";
     public static final String APPFILTER_ASSET = "appfilter.xml";
 
     // Asset layout of cm-13.0 theme packages, which embed their icon pack as uncompiled

@@ -18,6 +18,7 @@ package android.content.res;
 
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
+import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
 
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -47,6 +48,10 @@ public final class ThemeChangeRequest implements Parcelable {
 
     public String getWallpaperThemePackageName() {
         return getThemePackageNameForComponent(MODIFIES_LAUNCHER);
+    }
+
+    public String getLockWallpaperThemePackageName() {
+        return getThemePackageNameForComponent(MODIFIES_LOCKSCREEN);
     }
 
     public Map<String, String> getThemeComponentsMap() {
@@ -158,6 +163,10 @@ public final class ThemeChangeRequest implements Parcelable {
         public Builder setWallpaperId(long id) {
             mWallpaperId = id;
             return this;
+        }
+
+        public Builder setLockWallpaper(String pkgName) {
+            return setComponent(MODIFIES_LOCKSCREEN, pkgName);
         }
 
         public Builder setComponent(String component, String pkgName) {

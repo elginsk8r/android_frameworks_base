@@ -19,6 +19,7 @@ package com.android.server.theming;
 
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
+import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
 
 import android.Manifest;
 import android.annotation.NonNull;
@@ -199,6 +200,15 @@ public final class ThemeComponentService extends SystemService {
                     WallpaperManager.FLAG_SYSTEM, ThemeUtils.WALLPAPER_PATH,
                     request.getWallpaperId())) {
                 failed.add(MODIFIES_LAUNCHER);
+            }
+            incrementProgress(progressIncrement);
+        }
+
+        if (requested.containsKey(MODIFIES_LOCKSCREEN)) {
+            if (!updateWallpaper(userId, requested.get(MODIFIES_LOCKSCREEN),
+                    WallpaperManager.FLAG_LOCK, ThemeUtils.LOCKSCREEN_WALLPAPER_PATH,
+                    ThemeChangeRequest.DEFAULT_WALLPAPER_ID)) {
+                failed.add(MODIFIES_LOCKSCREEN);
             }
             incrementProgress(progressIncrement);
         }
@@ -574,6 +584,8 @@ public final class ThemeComponentService extends SystemService {
         switch (component) {
             case MODIFIES_LAUNCHER:
                 return getWallpaperMarker(userId, WallpaperManager.FLAG_SYSTEM);
+            case MODIFIES_LOCKSCREEN:
+                return getWallpaperMarker(userId, WallpaperManager.FLAG_LOCK);
             default:
                 return null;
         }
@@ -595,6 +607,7 @@ public final class ThemeComponentService extends SystemService {
             case MODIFIES_ICONS:
                 return areIconOverlaysEnabled(userId);
             case MODIFIES_LAUNCHER:
+            case MODIFIES_LOCKSCREEN:
                 return Objects.equals(state.markers.get(component),
                         getComponentMarker(userId, component));
             default:
