@@ -31,7 +31,8 @@ import java.util.List;
 /**
  * Constants and helpers shared by the theme component service and its clients.
  *
- * <p>A theme package identifies itself with
+ * <p>A theme is made up of a <em>theme package</em> plus any number of runtime resource overlay
+ * (RRO) packages. The theme package identifies itself with
  * {@code <meta-data android:name="org.lineageos.theme.name" android:value="..."/>} (the legacy
  * {@code org.cyanogenmod.theme.name} tag is also accepted) and carries non-overlay components as
  * assets:
@@ -42,6 +43,9 @@ import java.util.List;
  *     <li>{@code assets/bootanimation/bootanimation.zip}</li>
  *     <li>{@code assets/appfilter.xml} or {@code res/xml/appfilter.xml} - icon pack</li>
  * </ul>
+ * An RRO belongs to a theme when it declares
+ * {@code <meta-data android:name="org.lineageos.theme.parent" android:value="<theme package>"/>}
+ * or when its package name is {@code <theme package>.<anything>}.
  *
  * @hide
  */
@@ -52,6 +56,8 @@ public final class ThemeUtils {
     public static final String META_TAG_NAME = "org.lineageos.theme.name";
     /** Meta-data tag holding the theme author. */
     public static final String META_TAG_AUTHOR = "org.lineageos.theme.author";
+    /** Meta-data tag linking an overlay package to its theme package. */
+    public static final String META_TAG_PARENT = "org.lineageos.theme.parent";
     /** Legacy CyanogenMod theme meta-data tags. */
     public static final String LEGACY_META_TAG_NAME = "org.cyanogenmod.theme.name";
     public static final String LEGACY_META_TAG_AUTHOR = "org.cyanogenmod.theme.author";
@@ -65,10 +71,11 @@ public final class ThemeUtils {
     public static final String MODIFIES_NOTIFICATIONS = "mods_notifications";
     public static final String MODIFIES_ALARMS = "mods_alarms";
     public static final String MODIFIES_RINGTONES = "mods_ringtones";
+    public static final String MODIFIES_OVERLAYS = "mods_overlays";
 
     private static final List<String> ALL_COMPONENTS = Collections.unmodifiableList(Arrays.asList(
             MODIFIES_LAUNCHER, MODIFIES_LOCKSCREEN, MODIFIES_ICONS, MODIFIES_BOOT_ANIM,
-            MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES));
+            MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES, MODIFIES_OVERLAYS));
 
     // Asset paths inside a theme package
     public static final String WALLPAPER_PATH = "wallpapers";
@@ -137,6 +144,26 @@ public final class ThemeUtils {
         }
         final String name = metaData.getString(META_TAG_NAME);
         return name != null ? name : metaData.getString(LEGACY_META_TAG_NAME);
+    }
+
+    /**
+     * @param appInfo application info retrieved with {@link PackageManager#GET_META_DATA}
+     * @return the theme package an overlay package declares as its parent, or null
+     */
+    @Nullable
+    public static String getParentTheme(@Nullable ApplicationInfo appInfo) {
+        final Bundle metaData = appInfo != null ? appInfo.metaData : null;
+        return metaData != null ? metaData.getString(META_TAG_PARENT) : null;
+    }
+
+    /**
+     * Convenience method to determine if a theme component is a per app theme and not a standard
+     * component.
+     */
+    public static boolean isPerAppThemeComponent(@NonNull String component) {
+        return !(ThemeConfig.KEY_DEFAULT_PKG.equals(component)
+                || ThemeConfig.SYSTEMUI_STATUS_BAR_PKG.equals(component)
+                || ThemeConfig.SYSTEMUI_NAVBAR_PKG.equals(component));
     }
 
     /** @return intents resolving to activities of legacy (launcher) icon packs. */

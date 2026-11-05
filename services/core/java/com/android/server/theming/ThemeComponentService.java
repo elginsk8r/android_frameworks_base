@@ -23,6 +23,7 @@ import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
 import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
 import static android.content.pm.ThemeUtils.MODIFIES_NOTIFICATIONS;
+import static android.content.pm.ThemeUtils.MODIFIES_OVERLAYS;
 import static android.content.pm.ThemeUtils.MODIFIES_RINGTONES;
 
 import android.Manifest;
@@ -69,6 +70,7 @@ import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
@@ -85,6 +87,9 @@ import com.android.internal.util.DumpUtils;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
 import com.android.server.om.OverlayManagerInternal;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileDescriptor;
@@ -111,6 +116,10 @@ import java.util.function.Predicate;
  *
  * <p>Everything is delegated to existing platform mechanisms where one exists:
  * <ul>
+ *     <li>Overlays are the theme's runtime resource overlays, toggled through the
+ *     {@link android.content.om.OverlayManager}. Overlays in categories owned by SystemUI's
+ *     theme controller (shapes, icon packs) are applied through
+ *     {@link Settings.Secure#THEME_CUSTOMIZATION_OVERLAY_PACKAGES} while it is in charge.</li>
  *     <li>App icon packs are turned into one fabricated overlay per app replacing its icon, so
  *     the regular resource stack and launchers pick them up.</li>
  *     <li>Wallpapers go through the {@link WallpaperManager}, sounds through the
@@ -133,6 +142,20 @@ public final class ThemeComponentService extends SystemService {
     private static final String ICON_OVERLAY_CONFIG = "xxxhdpi";
     private static final int ICON_DENSITY = DisplayMetrics.DENSITY_XXXHIGH;
     private static final int ICON_SIZE_DP = 48;
+
+    // Overlay categories that SystemUI's ThemeOverlayController keeps in sync with
+    // Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES.
+    private static final Set<String> CUSTOMIZATION_CATEGORIES = new ArraySet<>(Arrays.asList(
+            "android.theme.customization.adaptive_icon_shape",
+            "android.theme.customization.icon_pack.android",
+            "android.theme.customization.icon_pack.systemui",
+            "android.theme.customization.icon_pack.settings",
+            "android.theme.customization.icon_pack.launcher",
+            "android.theme.customization.icon_pack.themepicker"));
+    private static final String CUSTOMIZATION_TIMESTAMP = "_applied_timestamp";
+
+    private static final List<String> OVERLAY_COMPONENTS = Arrays.asList(
+            MODIFIES_OVERLAYS);
 
     private static final File THEME_DIR = new File(Environment.getDataSystemDirectory(), "theme");
     private static final File BOOTANIMATION_DIR = new File("/data/misc/bootanim/theme");
@@ -186,9 +209,10 @@ public final class ThemeComponentService extends SystemService {
     // ------------------------------------------------------------------------------------------
     // Theme application
 
-    private void doApplyTheme(@UserIdInt int userId, @NonNull ThemeChangeRequest request) {
+    private void doApplyTheme(@UserIdInt int userId, @NonNull ThemeChangeRequest request,
+            boolean removePerAppThemes) {
         mProgress = 0;
-        if (request.getNumChangesRequested() == 0) {
+        if (request.getNumChangesRequested() == 0 && !removePerAppThemes) {
             postFinish(userId, true, request, 0);
             return;
         }
@@ -199,11 +223,27 @@ public final class ThemeComponentService extends SystemService {
         final UserState newState = state.copy();
         final Map<String, String> requested = request.getThemeComponentsMap();
         newState.components.putAll(requested);
+        if (removePerAppThemes) {
+            newState.perApp.clear();
+        }
+        for (Map.Entry<String, String> entry : request.getPerAppOverlays().entrySet()) {
+            if (entry.getValue() != null) {
+                newState.perApp.put(entry.getKey(), entry.getValue());
+            } else {
+                newState.perApp.remove(entry.getKey());
+            }
+        }
 
         final int progressIncrement = 90 / Math.max(1, request.getNumChangesRequested());
         boolean success = true;
         // Components that could not be applied keep the theme they had
         final Set<String> failed = new ArraySet<>();
+
+        if (!Collections.disjoint(requested.keySet(), OVERLAY_COMPONENTS)
+                || !request.getPerAppOverlays().isEmpty() || removePerAppThemes) {
+            success &= applyOverlays(userId, newState);
+            incrementProgress(progressIncrement);
+        }
 
         if (requested.containsKey(MODIFIES_ICONS)) {
             if (!applyIconPack(userId, requested.get(MODIFIES_ICONS), null)) {
@@ -299,7 +339,251 @@ public final class ThemeComponentService extends SystemService {
         for (String component : components) {
             builder.setComponent(component, themePkg);
         }
-        doApplyTheme(userId, builder.build());
+        doApplyTheme(userId, builder.build(), true);
+    }
+
+    /**
+     * Enables the overlays of the themes selected in {@code state} and disables the overlays of
+     * every other theme.
+     */
+    private boolean applyOverlays(@UserIdInt int userId, @NonNull UserState state) {
+        final Map<String, List<OverlayInfo>> allOverlays;
+        try {
+            allOverlays = mOverlayManager.getService().getAllOverlays(userId);
+        } catch (RemoteException e) {
+            // Local call, cannot happen
+            return false;
+        }
+
+        final PackageManager pm = getPackageManagerForUser(userId);
+        final Set<String> themes = getInstalledThemes(pm);
+        final Map<String, String> owners = new ArrayMap<>();
+        final boolean systemUiOwnsCustomizations = !android.server.Flags.enableThemeService();
+
+        final OverlayManagerTransaction.Builder transaction =
+                new OverlayManagerTransaction.Builder();
+        // Category -> overlay to enable, or null to drop a themed overlay from the setting
+        final Map<String, String> customizations = new ArrayMap<>();
+        boolean changed = false;
+
+        for (List<OverlayInfo> overlays : allOverlays.values()) {
+            for (OverlayInfo overlay : overlays) {
+                final ThemedOverlay themed = getThemedOverlay(overlay, pm, themes, owners);
+                if (themed == null) {
+                    continue;
+                }
+                final boolean enable = themed.theme.equals(
+                        getDesiredTheme(state, overlay.targetPackageName));
+
+                if (systemUiOwnsCustomizations && overlay.category != null
+                        && CUSTOMIZATION_CATEGORIES.contains(overlay.category)) {
+                    if (enable) {
+                        customizations.put(overlay.category, overlay.packageName);
+                    } else if (!customizations.containsKey(overlay.category)) {
+                        customizations.put(overlay.category, null);
+                    }
+                    continue;
+                }
+
+                if (overlay.isEnabled() != enable) {
+                    transaction.setEnabled(overlay.getOverlayIdentifier(), enable, userId);
+                    changed = true;
+                }
+            }
+        }
+
+        boolean success = true;
+        if (changed) {
+            success = commit(transaction);
+        }
+        if (!customizations.isEmpty()) {
+            success &= updateCustomizationSetting(userId, customizations, pm, themes, owners);
+        }
+        return success;
+    }
+
+    /** An overlay that is part of a theme. */
+    private static final class ThemedOverlay {
+        final String theme;
+        final String component;
+
+        ThemedOverlay(@NonNull String theme, @NonNull String component) {
+            this.theme = theme;
+            this.component = component;
+        }
+    }
+
+    /** @return the theme and component an overlay is part of, or null if it is not themed. */
+    @Nullable
+    private ThemedOverlay getThemedOverlay(@NonNull OverlayInfo overlay,
+            @NonNull PackageManager pm, @NonNull Set<String> themes,
+            @NonNull Map<String, String> owners) {
+        if (overlay.isFabricated()) {
+            return null;
+        }
+        final String owner = getOwningTheme(pm, overlay.packageName, themes, owners);
+        return owner != null ? new ThemedOverlay(owner, MODIFIES_OVERLAYS) : null;
+    }
+
+    /**
+     * @return the overlay components, and apps with a theme of their own, whose overlays are no
+     *         longer all enabled, e.g. because they were changed elsewhere
+     */
+    @NonNull
+    private Set<String> getDriftedOverlays(@UserIdInt int userId, @NonNull UserState state) {
+        final Set<String> drifted = new ArraySet<>();
+        if (!hasThemedOverlays(state)) {
+            return drifted;
+        }
+        final Map<String, List<OverlayInfo>> allOverlays;
+        try {
+            allOverlays = mOverlayManager.getService().getAllOverlays(userId);
+        } catch (RemoteException e) {
+            // Local call, cannot happen
+            return drifted;
+        }
+
+        final PackageManager pm = getPackageManagerForUser(userId);
+        final Set<String> themes = getInstalledThemes(pm);
+        final Map<String, String> owners = new ArrayMap<>();
+        final JSONObject customizations = !android.server.Flags.enableThemeService()
+                ? readCustomizationSetting(userId) : null;
+
+        for (List<OverlayInfo> overlays : allOverlays.values()) {
+            for (OverlayInfo overlay : overlays) {
+                final ThemedOverlay themed = getThemedOverlay(overlay, pm, themes, owners);
+                if (themed == null || !themed.theme.equals(
+                        getDesiredTheme(state, overlay.targetPackageName))) {
+                    continue;
+                }
+                final boolean enabled = customizations != null && overlay.category != null
+                        && CUSTOMIZATION_CATEGORIES.contains(overlay.category)
+                        ? overlay.packageName.equals(customizations.optString(overlay.category))
+                        : overlay.isEnabled();
+                if (!enabled) {
+                    drifted.add(MODIFIES_OVERLAYS.equals(themed.component)
+                            && state.perApp.containsKey(overlay.targetPackageName)
+                            ? overlay.targetPackageName : themed.component);
+                }
+            }
+        }
+        return drifted;
+    }
+
+    /** @return the overlays SystemUI's theme controller applies for a user. */
+    @NonNull
+    private JSONObject readCustomizationSetting(@UserIdInt int userId) {
+        final String setting = Settings.Secure.getStringForUser(mContext.getContentResolver(),
+                Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES, userId);
+        try {
+            return TextUtils.isEmpty(setting) ? new JSONObject() : new JSONObject(setting);
+        } catch (JSONException e) {
+            Slog.w(TAG, "Unable to read theme customizations " + setting, e);
+            return new JSONObject();
+        }
+    }
+
+    /** @return whether any overlay component or per app theme is set in {@code state}. */
+    private static boolean hasThemedOverlays(@NonNull UserState state) {
+        for (String component : OVERLAY_COMPONENTS) {
+            if (!ThemeUtils.isSystemDefault(state.components.get(component))) {
+                return true;
+            }
+        }
+        return !state.perApp.isEmpty();
+    }
+
+    /** @return the theme whose overlays should be enabled for a target. */
+    @Nullable
+    private static String getDesiredTheme(@NonNull UserState state, @NonNull String target) {
+        return state.perApp.containsKey(target)
+                ? state.perApp.get(target)
+                : state.components.get(MODIFIES_OVERLAYS);
+    }
+
+    /**
+     * @return the theme an overlay package belongs to, either declared through
+     *         {@link ThemeUtils#META_TAG_PARENT} or implied by a {@code <theme>.} package name
+     *         prefix, or null if it is not part of a theme.
+     */
+    @Nullable
+    private String getOwningTheme(@NonNull PackageManager pm, @NonNull String overlayPkg,
+            @NonNull Set<String> themes, @NonNull Map<String, String> cache) {
+        if (cache.containsKey(overlayPkg)) {
+            return cache.get(overlayPkg);
+        }
+        String owner = null;
+        try {
+            final ApplicationInfo ai = pm.getApplicationInfo(overlayPkg,
+                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA));
+            owner = ThemeUtils.getParentTheme(ai);
+        } catch (PackageManager.NameNotFoundException e) {
+            // Fall through to the name based lookup
+        }
+        if (owner == null) {
+            for (String theme : themes) {
+                if ((overlayPkg.equals(theme) || overlayPkg.startsWith(theme + "."))
+                        && (owner == null || theme.length() > owner.length())) {
+                    owner = theme;
+                }
+            }
+        }
+        cache.put(overlayPkg, owner);
+        return owner;
+    }
+
+    @NonNull
+    private static Set<String> getInstalledThemes(@NonNull PackageManager pm) {
+        final Set<String> themes = new ArraySet<>();
+        for (ApplicationInfo ai : pm.getInstalledApplications(
+                PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA))) {
+            if (ThemeUtils.isThemeApk(ai)) {
+                themes.add(ai.packageName);
+            }
+        }
+        return themes;
+    }
+
+    /**
+     * Hands overlays in SystemUI owned categories to SystemUI's theme controller, keeping any
+     * customizations that do not come from a theme.
+     */
+    private boolean updateCustomizationSetting(@UserIdInt int userId,
+            @NonNull Map<String, String> customizations, @NonNull PackageManager pm,
+            @NonNull Set<String> themes, @NonNull Map<String, String> owners) {
+        final ContentResolver resolver = mContext.getContentResolver();
+        final String current = Settings.Secure.getStringForUser(resolver,
+                Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES, userId);
+        try {
+            final JSONObject json = TextUtils.isEmpty(current)
+                    ? new JSONObject() : new JSONObject(current);
+            boolean changed = false;
+            for (Map.Entry<String, String> entry : customizations.entrySet()) {
+                final String category = entry.getKey();
+                final String overlay = entry.getValue();
+                final String applied = json.optString(category, null);
+                if (overlay != null) {
+                    if (!overlay.equals(applied)) {
+                        json.put(category, overlay);
+                        changed = true;
+                    }
+                } else if (applied != null
+                        && getOwningTheme(pm, applied, themes, owners) != null) {
+                    json.remove(category);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                json.put(CUSTOMIZATION_TIMESTAMP, System.currentTimeMillis());
+                Settings.Secure.putStringForUser(resolver,
+                        Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES, json.toString(),
+                        userId);
+            }
+            return true;
+        } catch (JSONException e) {
+            Slog.e(TAG, "Unable to update theme customizations " + current, e);
+            return false;
+        }
     }
 
     /**
@@ -725,11 +1009,19 @@ public final class ThemeComponentService extends SystemService {
 
         final String iconPack = state.components.get(MODIFIES_ICONS);
         final boolean iconPackActive = !ThemeUtils.isSystemDefault(iconPack);
-        if (pkgName.equals(iconPack)) {
-            // The applied icon pack was updated
-            applyIconPack(userId, iconPack, null);
-            sendThemeChangedBroadcast(userId, Collections.singletonList(MODIFIES_ICONS),
+        if (state.components.containsValue(pkgName) || state.perApp.containsValue(pkgName)) {
+            // An applied theme was updated, refresh its overlays and icons
+            if (pkgName.equals(iconPack)) {
+                applyIconPack(userId, iconPack, null);
+            }
+            applyOverlays(userId, state);
+            sendThemeChangedBroadcast(userId, Collections.singletonList(MODIFIES_OVERLAYS),
                     ThemeChangeRequest.RequestType.THEME_UPDATED, System.currentTimeMillis());
+            return;
+        }
+        if (ai.isResourceOverlay()) {
+            // May be an overlay of an applied theme
+            applyOverlays(userId, state);
             return;
         }
         if (iconPackActive) {
@@ -746,9 +1038,14 @@ public final class ThemeComponentService extends SystemService {
                 builder.setComponent(entry.getKey(), ThemeConfig.SYSTEM_DEFAULT);
             }
         }
+        for (Map.Entry<String, String> entry : state.perApp.entrySet()) {
+            if (pkgName.equals(entry.getKey()) || pkgName.equals(entry.getValue())) {
+                builder.setAppOverlay(entry.getKey(), null);
+            }
+        }
         final ThemeChangeRequest request = builder.build();
         if (request.getNumChangesRequested() > 0) {
-            mHandler.post(() -> doApplyTheme(userId, request));
+            mHandler.post(() -> doApplyTheme(userId, request, false));
         } else if (!ThemeUtils.isSystemDefault(state.components.get(MODIFIES_ICONS))) {
             // Drop the icon overlay of the removed app
             mHandler.post(() -> applyIconPack(userId, ThemeConfig.SYSTEM_DEFAULT,
@@ -832,11 +1129,11 @@ public final class ThemeComponentService extends SystemService {
     }
 
     /**
-     * @return whether a component the service applied for a user is still in place rather than
-     *         changed elsewhere since
+     * @return whether a component, or the theme of an app, the service applied for a user is
+     *         still in place rather than changed elsewhere since
      */
     private boolean isComponentApplied(@UserIdInt int userId, @NonNull UserState state,
-            @NonNull String component) {
+            @NonNull String component, @NonNull Set<String> driftedOverlays) {
         switch (component) {
             case MODIFIES_ICONS:
                 return areIconOverlaysEnabled(userId);
@@ -850,7 +1147,7 @@ public final class ThemeComponentService extends SystemService {
             case MODIFIES_BOOT_ANIM:
                 return BOOTANIMATION_FILE.exists();
             default:
-                return true;
+                return !driftedOverlays.contains(component);
         }
     }
 
@@ -904,6 +1201,9 @@ public final class ThemeComponentService extends SystemService {
         mClients.finishBroadcast();
 
         final List<String> components = new ArrayList<>(request.getThemeComponentsMap().keySet());
+        if (!request.getPerAppOverlays().isEmpty() && !components.contains(MODIFIES_OVERLAYS)) {
+            components.add(MODIFIES_OVERLAYS);
+        }
         if (!components.isEmpty()) {
             sendThemeChangedBroadcast(userId, components, request.getRequestType(), updateTime);
         }
@@ -936,10 +1236,11 @@ public final class ThemeComponentService extends SystemService {
         }
 
         @Override
-        public void requestThemeChange(ThemeChangeRequest request, int userId) {
+        public void requestThemeChange(ThemeChangeRequest request, boolean removePerAppThemes,
+                int userId) {
             enforceModifyPermission();
             final int resolvedUserId = handleIncomingUser(userId, "requestThemeChange");
-            mHandler.post(() -> doApplyTheme(resolvedUserId, request));
+            mHandler.post(() -> doApplyTheme(resolvedUserId, request, removePerAppThemes));
         }
 
         @Override
@@ -965,8 +1266,9 @@ public final class ThemeComponentService extends SystemService {
             final long token = Binder.clearCallingIdentity();
             try {
                 final UserState state = getUserState(resolvedUserId);
+                final Set<String> driftedOverlays = getDriftedOverlays(resolvedUserId, state);
                 return state.toThemeConfig(component -> isComponentApplied(resolvedUserId, state,
-                        component));
+                        component, driftedOverlays));
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -978,10 +1280,11 @@ public final class ThemeComponentService extends SystemService {
             final long token = Binder.clearCallingIdentity();
             try {
                 final UserState state = getUserState(resolvedUserId);
+                final Set<String> driftedOverlays = getDriftedOverlays(resolvedUserId, state);
                 final Map<String, String> components = new ArrayMap<>();
                 for (Map.Entry<String, String> entry : state.components.entrySet()) {
                     if (!ThemeUtils.isSystemDefault(entry.getValue()) && isComponentApplied(
-                            resolvedUserId, state, entry.getKey())) {
+                            resolvedUserId, state, entry.getKey(), driftedOverlays)) {
                         components.put(entry.getKey(), entry.getValue());
                     }
                 }
@@ -1015,6 +1318,7 @@ public final class ThemeComponentService extends SystemService {
                     final UserState state = mUserStates.valueAt(i);
                     pw.println("  user " + mUserStates.keyAt(i) + ":");
                     pw.println("    components=" + state.components);
+                    pw.println("    perApp=" + state.perApp);
                     pw.println("    markers=" + state.markers);
                     pw.println("    lastChangeTime=" + state.lastChangeTime
                             + " lastRequestType=" + state.lastRequestType);
@@ -1039,12 +1343,15 @@ public final class ThemeComponentService extends SystemService {
 
     private static final class UserState {
         private static final String KEY_COMPONENTS = "components";
+        private static final String KEY_PER_APP = "perApp";
         private static final String KEY_MARKERS = "markers";
         private static final String KEY_LAST_CHANGE_TIME = "lastChangeTime";
         private static final String KEY_LAST_REQUEST_TYPE = "lastRequestType";
 
         // Component -> theme package; ThemeConfig.SYSTEM_DEFAULT for an explicit reset
         final Map<String, String> components = new ArrayMap<>();
+        // App package -> theme package for per app overlays
+        final Map<String, String> perApp = new ArrayMap<>();
         // Component -> what tells whether the component the service applied is still in place
         final Map<String, String> markers = new ArrayMap<>();
         long lastChangeTime;
@@ -1053,6 +1360,7 @@ public final class ThemeComponentService extends SystemService {
         UserState copy() {
             final UserState copy = new UserState();
             copy.components.putAll(components);
+            copy.perApp.putAll(perApp);
             copy.markers.putAll(markers);
             copy.lastChangeTime = lastChangeTime;
             copy.lastRequestType = lastRequestType;
@@ -1078,12 +1386,18 @@ public final class ThemeComponentService extends SystemService {
         }
 
         /**
-         * @param isApplied tells whether a component is still in place
+         * @param isApplied tells whether a component, or the theme of an app, is still in place
          */
         ThemeConfig toThemeConfig(@NonNull Predicate<String> isApplied) {
-            return new ThemeConfig.Builder()
-                    .defaultIcon(getApplied(MODIFIES_ICONS, isApplied))
-                    .build();
+            final ThemeConfig.Builder builder = new ThemeConfig.Builder()
+                    .defaultOverlay(getApplied(MODIFIES_OVERLAYS, isApplied))
+                    .defaultIcon(getApplied(MODIFIES_ICONS, isApplied));
+            for (Map.Entry<String, String> entry : perApp.entrySet()) {
+                if (isApplied.test(entry.getKey())) {
+                    builder.overlay(entry.getKey(), entry.getValue());
+                }
+            }
+            return builder.build();
         }
 
         @Nullable
@@ -1110,6 +1424,9 @@ public final class ThemeComponentService extends SystemService {
                     switch (reader.nextName()) {
                         case KEY_COMPONENTS:
                             readMap(reader, state.components);
+                            break;
+                        case KEY_PER_APP:
+                            readMap(reader, state.perApp);
                             break;
                         case KEY_MARKERS:
                             readMap(reader, state.markers);
@@ -1142,6 +1459,8 @@ public final class ThemeComponentService extends SystemService {
                 writer.beginObject();
                 writer.name(KEY_COMPONENTS);
                 writeMap(writer, components);
+                writer.name(KEY_PER_APP);
+                writeMap(writer, perApp);
                 writer.name(KEY_MARKERS);
                 writeMap(writer, markers);
                 writer.name(KEY_LAST_CHANGE_TIME).value(lastChangeTime);

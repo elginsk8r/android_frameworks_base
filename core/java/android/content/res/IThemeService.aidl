@@ -26,7 +26,8 @@ interface IThemeService {
     oneway void requestThemeChangeUpdates(in IThemeChangeListener listener);
     oneway void removeUpdates(in IThemeChangeListener listener);
 
-    oneway void requestThemeChange(in ThemeChangeRequest request, int userId);
+    oneway void requestThemeChange(in ThemeChangeRequest request, boolean removePerAppThemes,
+            int userId);
     oneway void applyDefaultTheme(int userId);
     boolean isThemeApplying();
     int getProgress();

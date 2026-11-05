@@ -123,24 +123,35 @@ public class ThemeManager {
      * Apply the given components of a theme for the calling user.
      */
     public void requestThemeChange(@NonNull String pkgName, @NonNull List<String> components) {
+        requestThemeChange(pkgName, components, true);
+    }
+
+    public void requestThemeChange(@NonNull String pkgName, @NonNull List<String> components,
+            boolean removePerAppThemes) {
         final ThemeChangeRequest.Builder builder = new ThemeChangeRequest.Builder();
         for (String component : components) {
             builder.setComponent(component, pkgName);
         }
-        requestThemeChange(builder.build());
+        requestThemeChange(builder.build(), removePerAppThemes);
     }
 
     public void requestThemeChange(@NonNull Map<String, String> componentMap) {
+        requestThemeChange(componentMap, true);
+    }
+
+    public void requestThemeChange(@NonNull Map<String, String> componentMap,
+            boolean removePerAppThemes) {
         final ThemeChangeRequest.Builder builder = new ThemeChangeRequest.Builder();
         for (Map.Entry<String, String> entry : componentMap.entrySet()) {
             builder.setComponent(entry.getKey(), entry.getValue());
         }
-        requestThemeChange(builder.build());
+        requestThemeChange(builder.build(), removePerAppThemes);
     }
 
-    public void requestThemeChange(@NonNull ThemeChangeRequest request) {
+    public void requestThemeChange(@NonNull ThemeChangeRequest request,
+            boolean removePerAppThemes) {
         try {
-            mService.requestThemeChange(request, mContext.getUserId());
+            mService.requestThemeChange(request, removePerAppThemes, mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
