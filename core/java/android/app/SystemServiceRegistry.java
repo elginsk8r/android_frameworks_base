@@ -988,6 +988,16 @@ public final class SystemServiceRegistry {
                 }
             });
 
+        registerService(Context.THEME_COMPONENT_SERVICE, android.content.res.ThemeManager.class,
+                new CachedServiceFetcher<android.content.res.ThemeManager>() {
+            @Override
+            public android.content.res.ThemeManager createService(ContextImpl ctx)
+                    throws ServiceNotFoundException {
+                IBinder b = ServiceManager.getServiceOrThrow(Context.THEME_COMPONENT_SERVICE);
+                return new android.content.res.ThemeManager(ctx,
+                        android.content.res.IThemeService.Stub.asInterface(b));
+            }});
+
         registerService(Context.WALLPAPER_SERVICE, WallpaperManager.class,
                 new CachedServiceFetcher<WallpaperManager>() {
             @Override

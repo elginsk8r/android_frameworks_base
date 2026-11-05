@@ -4610,6 +4610,7 @@ public abstract class Context {
                 DEVICE_POLICY_SERVICE,
                 UI_MODE_SERVICE,
                 // @hide: THEME_SERVICE,
+                // @hide: THEME_COMPONENT_SERVICE,
                 DOWNLOAD_SERVICE,
                 NFC_SERVICE,
                 BLUETOOTH_SERVICE,
@@ -6668,6 +6669,16 @@ public abstract class Context {
      */
     @FlaggedApi(android.server.Flags.FLAG_ENABLE_THEME_SERVICE)
     public static final String THEME_SERVICE = "theme";
+
+    /**
+     * Use with {@link #getSystemService(String)} to retrieve a
+     * {@link android.content.res.ThemeManager} for applying theme packages.
+     *
+     * @see #getSystemService(String)
+     * @see android.content.res.ThemeManager
+     * @hide
+     */
+    public static final String THEME_COMPONENT_SERVICE = "themecomponent";
 
 
     /**
