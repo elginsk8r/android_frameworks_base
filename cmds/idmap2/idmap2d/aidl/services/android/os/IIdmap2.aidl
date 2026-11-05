@@ -46,6 +46,16 @@ interface IIdmap2 {
   @nullable FabricatedOverlayInfo createFabricatedOverlay(in FabricatedOverlayInternal overlay);
   boolean deleteFabricatedOverlay(@utf8InCpp String path);
 
+  /**
+   * Compiles the resources in the zip archive sources (a res/ directory tree) into an overlay
+   * for targetPackageName with aapt2, and stores it alongside the fabricated overlays so it is
+   * managed like one.
+   */
+  @nullable FabricatedOverlayInfo createCompiledOverlay(@utf8InCpp String packageName,
+                                                        @utf8InCpp String overlayName,
+                                                        @utf8InCpp String targetPackageName,
+                                                        in ParcelFileDescriptor sources);
+
   int acquireFabricatedOverlayIterator();
   void releaseFabricatedOverlayIterator(int iteratorId);
   List<FabricatedOverlayInfo> nextFabricatedOverlayInfos(int iteratorId);

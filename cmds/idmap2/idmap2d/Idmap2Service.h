@@ -23,6 +23,7 @@
 #include <android/os/IdmapParams.h>
 #include <android/os/OverlayConstraint.h>
 #include <binder/BinderService.h>
+#include <binder/ParcelFileDescriptor.h>
 #include <idmap2/ResourceContainer.h>
 #include <idmap2/Result.h>
 
@@ -69,6 +70,11 @@ class Idmap2Service : public BinderService<Idmap2Service>, public BnIdmap2 {
 
   binder::Status deleteFabricatedOverlay(const std::string& overlay_path,
                                          bool* _aidl_return) override;
+
+  binder::Status createCompiledOverlay(
+      const std::string& package_name, const std::string& overlay_name,
+      const std::string& target_package_name, const os::ParcelFileDescriptor& sources,
+      std::optional<os::FabricatedOverlayInfo>* _aidl_return) override;
 
   binder::Status acquireFabricatedOverlayIterator(int32_t* _aidl_return) override;
 

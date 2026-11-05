@@ -203,7 +203,10 @@ cc_library_static {
     },
     defaults: ["aapt2_defaults"],
     min_sdk_version: "apex_inherit",
-    apex_available: ["com.android.webapp"],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.webapp",
+    ],
 }
 
 // ==========================================================
@@ -241,11 +244,19 @@ cc_binary {
     use_version_lib: true,
     static_libs: ["libaapt2"],
     defaults: ["aapt2_defaults"],
-    dist: {
-        targets: ["aapt2_artifacts"],
+    target: {
+        host: {
+            // The device variant is installed for idmap2d, only dist the host tool
+            dist: {
+                targets: ["aapt2_artifacts"],
+            },
+        },
     },
     min_sdk_version: "apex_inherit",
-    apex_available: ["com.android.webapp"],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.webapp",
+    ],
 }
 
 // ==========================================================

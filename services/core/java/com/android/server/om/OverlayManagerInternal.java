@@ -22,6 +22,7 @@ import android.content.om.OverlayConstraint;
 import android.content.om.OverlayIdentifier;
 import android.content.om.OverlayInfo;
 import android.content.om.OverlayManagerTransaction;
+import android.os.ParcelFileDescriptor;
 import android.os.UserHandle;
 
 import java.util.List;
@@ -92,4 +93,20 @@ public interface OverlayManagerInternal {
      * @see OverlayManagerTransaction
      */
     void commit(@NonNull OverlayManagerTransaction transaction);
+
+    /**
+     * Compiles the resources in the zip archive {@code sources}, a {@code res/} directory tree,
+     * into an overlay for {@code targetPackageName} and registers it like a fabricated overlay
+     * owned by {@code owningPackage}, replacing an earlier overlay with the same name. The overlay
+     * is not enabled for any user.
+     *
+     * <p>Compiling may take a while, this must not be called with locks held.
+     *
+     * @return the identifier of the registered overlay
+     * @throws IllegalStateException with the compiler diagnostics if compiling fails
+     */
+    @NonNull
+    OverlayIdentifier registerCompiledOverlay(@NonNull String owningPackage,
+            @NonNull String overlayName, @NonNull String targetPackageName,
+            @NonNull ParcelFileDescriptor sources);
 }

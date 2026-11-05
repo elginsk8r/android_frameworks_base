@@ -43,6 +43,7 @@ import android.content.res.Flags;
 import android.os.FabricatedOverlayInfo;
 import android.os.FabricatedOverlayInternal;
 import android.os.IdmapParams;
+import android.os.ParcelFileDescriptor;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
@@ -617,6 +618,39 @@ final class OverlayManagerServiceImpl {
         return updatedTargets;
     }
 
+    /**
+     * Compiles the resources in the zip archive {@code sources} into an overlay. The overlay
+     * still needs to be registered with {@link #registerCompiledOverlay(FabricatedOverlayInfo)}.
+     *
+     * @throws IllegalStateException with the compiler diagnostics if compiling fails
+     */
+    @NonNull
+    FabricatedOverlayInfo compileOverlay(@NonNull String owningPackage,
+            @NonNull String overlayName, @NonNull String targetPackageName,
+            @NonNull ParcelFileDescriptor sources) {
+        if (FrameworkParsingPackageUtils.validateName(overlayName,
+                false /* requireSeparator */, true /* requireFilename */) != null) {
+            throw new IllegalArgumentException(
+                    "overlay name can only consist of alphanumeric characters, '_', and '.'");
+        }
+        return mIdmapManager.createCompiledOverlay(owningPackage, overlayName,
+                targetPackageName, sources);
+    }
+
+    /**
+     * Registers a compiled overlay for all users. Compiled overlays are stored and managed like
+     * fabricated overlays.
+     */
+    @NonNull
+    Set<UserPackage> registerCompiledOverlay(@NonNull final FabricatedOverlayInfo info)
+            throws OperationFailedException {
+        final Set<UserPackage> updatedTargets = new ArraySet<>();
+        for (int userId : mSettings.getUsers()) {
+            updatedTargets.addAll(registerFabricatedOverlay(info, userId));
+        }
+        return updatedTargets;
+    }
+
     @NonNull
     private Set<UserPackage> registerFabricatedOverlay(
             @NonNull final FabricatedOverlayInfo info, int userId)
@@ -959,7 +993,7 @@ final class OverlayManagerServiceImpl {
                     params.fulfilledPolicies = mIdmapManager.calculateFulfilledPolicies(
                             targetPackage, overlayPackageState, overlayPackage, userId);
                     params.enforceOverlayable = mIdmapManager.enforceOverlayable(
-                            overlayPackageState, overlayPackage);
+                            overlayPackageState, overlayPackage, params.overlayPath);
                     params.userId = userId;
                     params.constraints = IdmapManager.toIdmapConstraints(
                             updatedOverlayInfo.constraints);

@@ -65,9 +65,11 @@ import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.FabricatedOverlayInfo;
 import android.os.FabricatedOverlayInternal;
 import android.os.HandlerThread;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
@@ -1252,6 +1254,30 @@ public final class OverlayManagerService extends SystemService {
                 getService().commit(transaction);
             } catch (RemoteException e) {
                 throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        @NonNull
+        public OverlayIdentifier registerCompiledOverlay(@NonNull String owningPackage,
+                @NonNull String overlayName, @NonNull String targetPackageName,
+                @NonNull ParcelFileDescriptor sources) {
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                // Compile without holding the lock, it may take a while
+                final FabricatedOverlayInfo info = mImpl.compileOverlay(owningPackage,
+                        overlayName, targetPackageName, sources);
+                synchronized (mLock) {
+                    try {
+                        updateTargetPackagesLocked(mImpl.registerCompiledOverlay(info));
+                    } catch (OperationFailedException e) {
+                        restoreSettingsLocked();
+                        throw new IllegalStateException(e.getMessage(), e);
+                    }
+                }
+                return new OverlayIdentifier(info.packageName, info.overlayName);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
             }
         }
     };

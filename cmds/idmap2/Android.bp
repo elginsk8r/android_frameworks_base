@@ -349,6 +349,8 @@ cc_binary {
         "libidmap2daidl",
     ],
     init_rc: ["idmap2d/idmap2d.rc"],
+    // Compiles legacy theme overlays, see Idmap2Service::createCompiledOverlay
+    required: ["aapt2"],
 }
 
 cc_library_static {

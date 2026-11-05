@@ -21,6 +21,7 @@ import static com.android.server.om.OverlayManagerService.TAG;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.content.om.OverlayConstraint;
 import android.content.om.OverlayInfo;
@@ -32,6 +33,7 @@ import android.os.IBinder;
 import android.os.IdmapParams;
 import android.os.OverlayablePolicy;
 import android.os.Parcel;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemProperties;
 import android.text.TextUtils;
 import android.util.Slog;
@@ -53,6 +55,9 @@ import java.util.List;
  * @see IdmapDaemon
  */
 final class IdmapManager {
+    // Where idmap2d stores fabricated and compiled overlays
+    private static final String RESOURCE_CACHE_DIR = "/data/resource-cache/";
+
     private static final boolean VENDOR_IS_Q_OR_LATER;
     static {
         final String value = SystemProperties.get("ro.vndk.version", "29");
@@ -118,7 +123,8 @@ final class IdmapManager {
         try {
             int policies = calculateFulfilledPolicies(targetPackage, overlayPackageState,
                     overlayPackage, userId);
-            boolean enforce = enforceOverlayable(overlayPackageState, overlayPackage);
+            boolean enforce = enforceOverlayable(overlayPackageState, overlayPackage,
+                    overlayBasePath);
             android.os.OverlayConstraint[] idmapConstraints = toIdmapConstraints(constraints);
             if (mIdmapDaemon.verifyIdmap(targetPath, overlayBasePath, overlayName, policies,
                     enforce, userId, idmapConstraints)) {
@@ -234,6 +240,19 @@ final class IdmapManager {
     }
 
     /**
+     * Compiles the resources in the zip archive {@code sources} into an overlay.
+     *
+     * @throws IllegalStateException with the compiler diagnostics if compiling fails
+     */
+    @NonNull
+    FabricatedOverlayInfo createCompiledOverlay(@NonNull String packageName,
+            @NonNull String overlayName, @NonNull String targetPackageName,
+            @NonNull ParcelFileDescriptor sources) {
+        return mIdmapDaemon.createCompiledOverlay(packageName, overlayName, targetPackageName,
+                sources);
+    }
+
+    /**
      * Deletes the fabricated overlay file on disk.
      * @return whether the path was deleted
      */
@@ -253,6 +272,28 @@ final class IdmapManager {
      * Checks if overlayable and policies should be enforced on the specified overlay for backwards
      * compatibility with pre-Q overlays.
      */
+    /**
+     * Like {@link #enforceOverlayable(PackageState, AndroidPackage)}, but never enforces
+     * overlayable restrictions on overlays compiled from theme packages, which may overlay any
+     * resource like the themes of cm-13.0 could.
+     */
+    boolean enforceOverlayable(@NonNull PackageState overlayPackageState,
+            @NonNull final AndroidPackage overlayPackage, @Nullable String overlayBasePath) {
+        if (isCompiledOverlay(overlayBasePath)) {
+            return false;
+        }
+        return enforceOverlayable(overlayPackageState, overlayPackage);
+    }
+
+    /**
+     * @return whether the overlay at the path was compiled from a theme package, see
+     *         {@link IdmapDaemon#createCompiledOverlay}
+     */
+    static boolean isCompiledOverlay(@Nullable String overlayBasePath) {
+        return overlayBasePath != null && overlayBasePath.startsWith(RESOURCE_CACHE_DIR)
+                && overlayBasePath.endsWith(".apk");
+    }
+
     boolean enforceOverlayable(@NonNull PackageState overlayPackageState,
             @NonNull final AndroidPackage overlayPackage) {
         if (overlayPackage.getTargetSdkVersion() >= VERSION_CODES.Q) {

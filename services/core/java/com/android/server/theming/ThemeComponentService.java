@@ -47,6 +47,7 @@ import android.content.om.OverlayIdentifier;
 import android.content.om.OverlayInfo;
 import android.content.om.OverlayManagerTransaction;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ThemeUtils;
@@ -170,16 +171,27 @@ public final class ThemeComponentService extends SystemService {
             new File(BOOTANIMATION_DIR, "bootanimation.zip");
     private static final String STATE_FILE = "theme_components.json";
 
+    // Overlays compiled from cm-13.0 theme packages are owned by the system like the icon
+    // overlays, and tracked in COMPILED_OVERLAYS_FILE to map them back to their theme.
+    private static final String COMPILED_OVERLAY_OWNER = ANDROID_PACKAGE;
+    private static final String COMPILED_OVERLAY_PREFIX = "theme_compiled_";
+    private static final File COMPILED_OVERLAYS_FILE =
+            new File(THEME_DIR, "compiled_overlays.json");
+
     // Give the overlay manager time to pick up overlay packages before reacting to them.
     private static final long PACKAGE_CHANGE_DELAY_MS = 2000;
 
     private final Context mContext;
     private final Handler mHandler;
     private OverlayManagerInternal mOverlayManager;
+    private LegacyOverlayCompiler mLegacyCompiler;
 
     private final Object mLock = new Object();
     @GuardedBy("mLock")
     private final SparseArray<UserState> mUserStates = new SparseArray<>();
+    // Overlay name -> compiled overlay, loaded on first use
+    @GuardedBy("mLock")
+    private Map<String, CompiledOverlay> mCompiledOverlays;
 
     private final RemoteCallbackList<IThemeChangeListener> mClients = new RemoteCallbackList<>();
     private volatile boolean mIsThemeApplying;
@@ -197,6 +209,8 @@ public final class ThemeComponentService extends SystemService {
     @Override
     public void onStart() {
         mOverlayManager = LocalServices.getService(OverlayManagerInternal.class);
+        mLegacyCompiler = new LegacyOverlayCompiler(mOverlayManager,
+                new File(THEME_DIR, "compile"));
         publishBinderService(Context.THEME_COMPONENT_SERVICE, mService);
     }
 
@@ -363,6 +377,8 @@ public final class ThemeComponentService extends SystemService {
      * every other theme.
      */
     private boolean applyOverlays(@UserIdInt int userId, @NonNull UserState state) {
+        ensureCompiledOverlays(userId, state);
+
         final Map<String, List<OverlayInfo>> allOverlays;
         try {
             allOverlays = mOverlayManager.getService().getAllOverlays(userId);
@@ -442,7 +458,9 @@ public final class ThemeComponentService extends SystemService {
             @NonNull PackageManager pm, @NonNull Set<String> themes,
             @NonNull Map<String, String> owners) {
         if (overlay.isFabricated()) {
-            return null;
+            final CompiledOverlay compiled = getCompiledOverlay(overlay);
+            return compiled != null ? new ThemedOverlay(compiled.theme,
+                    ThemeUtils.getLegacyOverlayComponent(compiled.legacyTarget)) : null;
         }
         final String owner = getOwningTheme(pm, overlay.packageName, themes, owners);
         return owner != null ? new ThemedOverlay(owner, getComponent(overlay)) : null;
@@ -514,6 +532,132 @@ public final class ThemeComponentService extends SystemService {
             }
         }
         return !state.perApp.isEmpty();
+    }
+
+    /**
+     * Compiles the overlays of the cm-13.0 themes {@code state} selects that are missing or were
+     * compiled from an older version of the theme or of their target.
+     */
+    private void ensureCompiledOverlays(@UserIdInt int userId, @NonNull UserState state) {
+        final Set<String> themes = new ArraySet<>(state.components.values());
+        themes.addAll(state.perApp.values());
+        for (String theme : themes) {
+            if (ThemeUtils.isSystemDefault(theme)) {
+                continue;
+            }
+            final PackageInfo themeInfo = getPackageInfo(userId, theme);
+            if (themeInfo == null || themeInfo.applicationInfo == null) {
+                continue;
+            }
+            for (String legacyTarget :
+                    LegacyOverlayCompiler.getTargets(themeInfo.applicationInfo.sourceDir)) {
+                final String target = ThemeUtils.getLegacyOverlayTargetPackage(legacyTarget);
+                final String component = ThemeUtils.getLegacyOverlayComponent(legacyTarget);
+                if (!theme.equals(getDesiredTheme(state, component, target))) {
+                    continue;
+                }
+                final PackageInfo targetInfo = getPackageInfo(userId, target);
+                if (targetInfo != null) {
+                    compileOverlay(userId, themeInfo, legacyTarget, targetInfo);
+                }
+            }
+        }
+    }
+
+    private void compileOverlay(@UserIdInt int userId, @NonNull PackageInfo theme,
+            @NonNull String legacyTarget, @NonNull PackageInfo target) {
+        final String name = COMPILED_OVERLAY_PREFIX
+                + Integer.toHexString(theme.packageName.hashCode()) + "_"
+                + Integer.toHexString(legacyTarget.hashCode());
+        final CompiledOverlay existing;
+        synchronized (mLock) {
+            existing = getCompiledOverlaysLocked().get(name);
+        }
+        if (existing != null && existing.theme.equals(theme.packageName)
+                && existing.themeVersion == theme.lastUpdateTime
+                && existing.targetVersion == target.lastUpdateTime
+                && mOverlayManager.getOverlayInfo(
+                        new OverlayIdentifier(COMPILED_OVERLAY_OWNER, name),
+                        UserHandle.of(userId)) != null) {
+            return;
+        }
+
+        Slog.i(TAG, "Compiling " + legacyTarget + " overlay of " + theme.packageName);
+        if (mLegacyCompiler.compile(COMPILED_OVERLAY_OWNER, name,
+                theme.applicationInfo.sourceDir, legacyTarget) == null) {
+            return;
+        }
+        synchronized (mLock) {
+            getCompiledOverlaysLocked().put(name, new CompiledOverlay(theme.packageName,
+                    legacyTarget, theme.lastUpdateTime, target.lastUpdateTime));
+            writeCompiledOverlaysLocked();
+        }
+    }
+
+    /** @return the compiled overlay an overlay is, or null if it is not one. */
+    @Nullable
+    private CompiledOverlay getCompiledOverlay(@NonNull OverlayInfo overlay) {
+        final String name = overlay.getOverlayName();
+        if (!COMPILED_OVERLAY_OWNER.equals(overlay.packageName) || name == null
+                || !name.startsWith(COMPILED_OVERLAY_PREFIX)) {
+            return null;
+        }
+        synchronized (mLock) {
+            return getCompiledOverlaysLocked().get(name);
+        }
+    }
+
+    /** @return whether there are compiled overlays of the given theme or for the given target. */
+    private boolean hasCompiledOverlays(@NonNull String pkgName) {
+        synchronized (mLock) {
+            for (CompiledOverlay compiled : getCompiledOverlaysLocked().values()) {
+                if (pkgName.equals(compiled.theme) || pkgName.equals(
+                        ThemeUtils.getLegacyOverlayTargetPackage(compiled.legacyTarget))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Unregisters the compiled overlays of a theme that is no longer installed. */
+    private void removeCompiledOverlays(@NonNull String theme) {
+        final OverlayManagerTransaction.Builder transaction =
+                new OverlayManagerTransaction.Builder();
+        boolean changed = false;
+        synchronized (mLock) {
+            final Map<String, CompiledOverlay> compiledOverlays = getCompiledOverlaysLocked();
+            // ArrayMap entries are views by index, iterate over a copy of the names instead
+            for (String name : new ArrayList<>(compiledOverlays.keySet())) {
+                if (theme.equals(compiledOverlays.get(name).theme)) {
+                    transaction.unregisterFabricatedOverlay(
+                            new OverlayIdentifier(COMPILED_OVERLAY_OWNER, name));
+                    compiledOverlays.remove(name);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                writeCompiledOverlaysLocked();
+            }
+        }
+        if (changed) {
+            commit(transaction);
+        }
+    }
+
+    @GuardedBy("mLock")
+    @NonNull
+    private Map<String, CompiledOverlay> getCompiledOverlaysLocked() {
+        if (mCompiledOverlays == null) {
+            mCompiledOverlays = CompiledOverlay.read(new AtomicFile(COMPILED_OVERLAYS_FILE));
+        }
+        return mCompiledOverlays;
+    }
+
+    @GuardedBy("mLock")
+    private void writeCompiledOverlaysLocked() {
+        THEME_DIR.mkdirs();
+        CompiledOverlay.write(new AtomicFile(COMPILED_OVERLAYS_FILE), mCompiledOverlays);
     }
 
     @NonNull
@@ -1069,10 +1213,13 @@ public final class ThemeComponentService extends SystemService {
                     ThemeChangeRequest.RequestType.THEME_UPDATED, System.currentTimeMillis());
             return;
         }
-        if (ai.isResourceOverlay()) {
-            // May be an overlay of an applied theme
+        if (ai.isResourceOverlay() || hasCompiledOverlays(pkgName) || hasThemedOverlays(state)) {
+            // May be an overlay of an applied theme, the target of compiled overlays which need
+            // to be compiled again or an app a cm-13.0 theme has overlays for
             applyOverlays(userId, state);
-            return;
+            if (!iconPackActive || ai.isResourceOverlay()) {
+                return;
+            }
         }
         if (iconPackActive) {
             applyIconPack(userId, iconPack, Collections.singleton(pkgName));
@@ -1080,6 +1227,9 @@ public final class ThemeComponentService extends SystemService {
     }
 
     private void onPackageRemoved(@UserIdInt int userId, @NonNull String pkgName) {
+        if (hasCompiledOverlays(pkgName) && !isInstalledForAnyUser(pkgName)) {
+            mHandler.post(() -> removeCompiledOverlays(pkgName));
+        }
         final UserState state = getUserState(userId);
         final ThemeChangeRequest.Builder builder = new ThemeChangeRequest.Builder()
                 .setRequestType(ThemeChangeRequest.RequestType.THEME_REMOVED);
@@ -1129,6 +1279,26 @@ public final class ThemeComponentService extends SystemService {
                     PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA));
         } catch (PackageManager.NameNotFoundException e) {
             return null;
+        }
+    }
+
+    @Nullable
+    private PackageInfo getPackageInfo(@UserIdInt int userId, @NonNull String pkgName) {
+        try {
+            return getPackageManagerForUser(userId).getPackageInfo(pkgName,
+                    PackageManager.PackageInfoFlags.of(0));
+        } catch (PackageManager.NameNotFoundException e) {
+            return null;
+        }
+    }
+
+    private boolean isInstalledForAnyUser(@NonNull String pkgName) {
+        try {
+            mContext.getPackageManager().getPackageInfo(pkgName,
+                    PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ANY_USER));
+            return true;
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
         }
     }
 
@@ -1549,4 +1719,102 @@ public final class ThemeComponentService extends SystemService {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Overlays compiled from cm-13.0 theme packages
+
+    private static final class CompiledOverlay {
+        private static final String KEY_THEME = "theme";
+        private static final String KEY_TARGET = "target";
+        private static final String KEY_THEME_VERSION = "themeVersion";
+        private static final String KEY_TARGET_VERSION = "targetVersion";
+
+        final String theme;
+        // The directory of the theme's assets/overlays the overlay was compiled from
+        final String legacyTarget;
+        // lastUpdateTime of the theme and target packages the overlay was compiled for
+        final long themeVersion;
+        final long targetVersion;
+
+        CompiledOverlay(@NonNull String theme, @NonNull String legacyTarget, long themeVersion,
+                long targetVersion) {
+            this.theme = theme;
+            this.legacyTarget = legacyTarget;
+            this.themeVersion = themeVersion;
+            this.targetVersion = targetVersion;
+        }
+
+        @NonNull
+        static Map<String, CompiledOverlay> read(@NonNull AtomicFile file) {
+            final Map<String, CompiledOverlay> overlays = new ArrayMap<>();
+            if (!file.exists()) {
+                return overlays;
+            }
+            try (JsonReader reader = new JsonReader(new InputStreamReader(file.openRead(),
+                    StandardCharsets.UTF_8))) {
+                reader.beginObject();
+                while (reader.hasNext()) {
+                    final String name = reader.nextName();
+                    String theme = null;
+                    String legacyTarget = null;
+                    long themeVersion = 0;
+                    long targetVersion = 0;
+                    reader.beginObject();
+                    while (reader.hasNext()) {
+                        switch (reader.nextName()) {
+                            case KEY_THEME:
+                                theme = reader.nextString();
+                                break;
+                            case KEY_TARGET:
+                                legacyTarget = reader.nextString();
+                                break;
+                            case KEY_THEME_VERSION:
+                                themeVersion = reader.nextLong();
+                                break;
+                            case KEY_TARGET_VERSION:
+                                targetVersion = reader.nextLong();
+                                break;
+                            default:
+                                reader.skipValue();
+                                break;
+                        }
+                    }
+                    reader.endObject();
+                    if (theme != null && legacyTarget != null) {
+                        overlays.put(name, new CompiledOverlay(theme, legacyTarget,
+                                themeVersion, targetVersion));
+                    }
+                }
+                reader.endObject();
+            } catch (IOException | IllegalStateException e) {
+                Slog.e(TAG, "Unable to read compiled overlays", e);
+            }
+            return overlays;
+        }
+
+        static void write(@NonNull AtomicFile file,
+                @NonNull Map<String, CompiledOverlay> overlays) {
+            FileOutputStream out = null;
+            try {
+                out = file.startWrite();
+                final JsonWriter writer = new JsonWriter(
+                        new OutputStreamWriter(out, StandardCharsets.UTF_8));
+                writer.beginObject();
+                for (Map.Entry<String, CompiledOverlay> entry : overlays.entrySet()) {
+                    final CompiledOverlay overlay = entry.getValue();
+                    writer.name(entry.getKey()).beginObject();
+                    writer.name(KEY_THEME).value(overlay.theme);
+                    writer.name(KEY_TARGET).value(overlay.legacyTarget);
+                    writer.name(KEY_THEME_VERSION).value(overlay.themeVersion);
+                    writer.name(KEY_TARGET_VERSION).value(overlay.targetVersion);
+                    writer.endObject();
+                }
+                writer.endObject();
+                writer.flush();
+                file.finishWrite(out);
+            } catch (IOException e) {
+                Slog.e(TAG, "Unable to write compiled overlays", e);
+                file.failWrite(out);
+            }
+        }
+    }
 }

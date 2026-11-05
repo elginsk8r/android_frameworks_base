@@ -28,8 +28,10 @@ import android.os.IBinder;
 import android.os.IIdmap2;
 import android.os.IdmapParams;
 import android.os.OverlayConstraint;
+import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.ServiceSpecificException;
 import android.os.StrictMode;
 import android.os.SystemClock;
 import android.os.SystemService;
@@ -226,6 +228,36 @@ class IdmapDaemon {
         } catch (Exception e) {
             Slog.wtf(TAG, "failed to fabricate overlay " + overlay, e);
             return null;
+        }
+    }
+
+    /**
+     * Compiles the resources in the zip archive {@code sources} into an overlay with aapt2.
+     *
+     * @throws IllegalStateException with the compiler diagnostics if compiling fails
+     */
+    @NonNull
+    FabricatedOverlayInfo createCompiledOverlay(@NonNull String packageName,
+            @NonNull String overlayName, @NonNull String targetPackageName,
+            @NonNull ParcelFileDescriptor sources) {
+        try (Connection c = connect()) {
+            final IIdmap2 idmap2 = c.getIdmap2();
+            if (idmap2 == null) {
+                throw new IllegalStateException(
+                        "idmap2d service is not ready for createCompiledOverlay()");
+            }
+            final FabricatedOverlayInfo info = idmap2.createCompiledOverlay(packageName,
+                    overlayName, targetPackageName, sources);
+            if (info == null) {
+                throw new IllegalStateException(
+                        "failed to compile overlay " + packageName + ":" + overlayName);
+            }
+            return info;
+        } catch (ServiceSpecificException e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        } catch (TimeoutException | RemoteException e) {
+            throw new IllegalStateException(
+                    "failed to compile overlay " + packageName + ":" + overlayName, e);
         }
     }
 

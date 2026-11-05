@@ -93,8 +93,11 @@ public final class ThemeUtils {
     public static final String BOOTANIMATION_PATH = "bootanimation/bootanimation.zip";
     public static final String APPFILTER_ASSET = "appfilter.xml";
 
-    // Asset layout of cm-13.0 theme packages, which embed their icon pack as uncompiled
-    // resources.
+    // Asset layout of cm-13.0 theme packages. Overlay resources live uncompiled in
+    // assets/overlays/<target>/res and are compiled on the device; resources in the "common"
+    // directory are shared by all targets and SystemUI's navigation bar uses its own directory.
+    public static final String LEGACY_OVERLAYS_PATH = "overlays";
+    public static final String LEGACY_COMMON_TARGET = "common";
     public static final String LEGACY_ICONS_PATH = "icons/res";
     public static final String LEGACY_APPFILTER_ASSET = LEGACY_ICONS_PATH + "/xml/appfilter.xml";
 
@@ -171,6 +174,31 @@ public final class ThemeUtils {
         return !(ThemeConfig.KEY_DEFAULT_PKG.equals(component)
                 || ThemeConfig.SYSTEMUI_STATUS_BAR_PKG.equals(component)
                 || ThemeConfig.SYSTEMUI_NAVBAR_PKG.equals(component));
+    }
+
+    /**
+     * @param legacyTarget a directory in {@link #LEGACY_OVERLAYS_PATH} of a cm-13.0 theme
+     * @return the package the overlays in that directory apply to
+     */
+    @NonNull
+    public static String getLegacyOverlayTargetPackage(@NonNull String legacyTarget) {
+        return ThemeConfig.SYSTEMUI_NAVBAR_PKG.equals(legacyTarget)
+                ? ThemeConfig.SYSTEMUI_STATUS_BAR_PKG : legacyTarget;
+    }
+
+    /**
+     * @param legacyTarget a directory in {@link #LEGACY_OVERLAYS_PATH} of a cm-13.0 theme
+     * @return the theme component the overlays in that directory belong to
+     */
+    @NonNull
+    public static String getLegacyOverlayComponent(@NonNull String legacyTarget) {
+        if (ThemeConfig.SYSTEMUI_NAVBAR_PKG.equals(legacyTarget)) {
+            return MODIFIES_NAVIGATION_BAR;
+        }
+        if (ThemeConfig.SYSTEMUI_STATUS_BAR_PKG.equals(legacyTarget)) {
+            return MODIFIES_STATUS_BAR;
+        }
+        return MODIFIES_OVERLAYS;
     }
 
     /** @return intents resolving to activities of legacy (launcher) icon packs. */
