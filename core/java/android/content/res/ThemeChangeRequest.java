@@ -17,6 +17,7 @@
 package android.content.res;
 
 import static android.content.pm.ThemeUtils.MODIFIES_ALARMS;
+import static android.content.pm.ThemeUtils.MODIFIES_BOOT_ANIM;
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
 import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
@@ -47,6 +48,10 @@ public final class ThemeChangeRequest implements Parcelable {
 
     public String getIconsThemePackageName() {
         return getThemePackageNameForComponent(MODIFIES_ICONS);
+    }
+
+    public String getBootanimationThemePackageName() {
+        return getThemePackageNameForComponent(MODIFIES_BOOT_ANIM);
     }
 
     public String getWallpaperThemePackageName() {
@@ -168,6 +173,10 @@ public final class ThemeChangeRequest implements Parcelable {
 
         public Builder setIcons(String pkgName) {
             return setComponent(MODIFIES_ICONS, pkgName);
+        }
+
+        public Builder setBootanimation(String pkgName) {
+            return setComponent(MODIFIES_BOOT_ANIM, pkgName);
         }
 
         public Builder setWallpaper(String pkgName) {

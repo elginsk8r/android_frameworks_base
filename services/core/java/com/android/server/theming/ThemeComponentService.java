@@ -18,6 +18,7 @@
 package com.android.server.theming;
 
 import static android.content.pm.ThemeUtils.MODIFIES_ALARMS;
+import static android.content.pm.ThemeUtils.MODIFIES_BOOT_ANIM;
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
 import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
@@ -114,6 +115,8 @@ import java.util.function.Predicate;
  *     the regular resource stack and launchers pick them up.</li>
  *     <li>Wallpapers go through the {@link WallpaperManager}, sounds through the
  *     {@link MediaStore} and {@link RingtoneManager}.</li>
+ *     <li>Boot animations are copied to {@link #BOOTANIMATION_FILE}, which bootanimation
+ *     prefers over the built in animation.</li>
  * </ul>
  */
 public final class ThemeComponentService extends SystemService {
@@ -132,6 +135,9 @@ public final class ThemeComponentService extends SystemService {
     private static final int ICON_SIZE_DP = 48;
 
     private static final File THEME_DIR = new File(Environment.getDataSystemDirectory(), "theme");
+    private static final File BOOTANIMATION_DIR = new File("/data/misc/bootanim/theme");
+    private static final File BOOTANIMATION_FILE =
+            new File(BOOTANIMATION_DIR, "bootanimation.zip");
     private static final String STATE_FILE = "theme_components.json";
 
     // Give the overlay manager time to pick up overlay packages before reacting to them.
@@ -244,6 +250,13 @@ public final class ThemeComponentService extends SystemService {
             if (!updateAudible(userId, requested.get(MODIFIES_ALARMS),
                     RingtoneManager.TYPE_ALARM)) {
                 failed.add(MODIFIES_ALARMS);
+            }
+            incrementProgress(progressIncrement);
+        }
+
+        if (requested.containsKey(MODIFIES_BOOT_ANIM)) {
+            if (!updateBootAnimation(userId, requested.get(MODIFIES_BOOT_ANIM))) {
+                failed.add(MODIFIES_BOOT_ANIM);
             }
             incrementProgress(progressIncrement);
         }
@@ -628,6 +641,42 @@ public final class ThemeComponentService extends SystemService {
         }
     }
 
+    private boolean updateBootAnimation(@UserIdInt int userId, @Nullable String pkgName) {
+        // The boot animation is shared by all users, only the main user may change it.
+        final UserHandle mainUser = mContext.getSystemService(UserManager.class).getMainUser();
+        if (userId != UserHandle.USER_SYSTEM
+                && (mainUser == null || mainUser.getIdentifier() != userId)) {
+            Slog.w(TAG, "User " + userId + " may not change the boot animation");
+            return false;
+        }
+
+        if (ThemeUtils.isSystemDefault(pkgName)) {
+            BOOTANIMATION_FILE.delete();
+            return true;
+        }
+
+        final File tmp = new File(BOOTANIMATION_DIR, BOOTANIMATION_FILE.getName() + ".tmp");
+        try {
+            BOOTANIMATION_DIR.mkdirs();
+            FileUtils.setPermissions(BOOTANIMATION_DIR, 0755, -1, -1);
+            try (InputStream in = getThemeContext(userId, pkgName).getAssets().open(
+                    ThemeUtils.BOOTANIMATION_PATH);
+                    FileOutputStream out = new FileOutputStream(tmp)) {
+                FileUtils.copy(in, out);
+                out.getFD().sync();
+            }
+            FileUtils.setPermissions(tmp, 0644, -1, -1);
+            if (!tmp.renameTo(BOOTANIMATION_FILE)) {
+                throw new IOException("Unable to rename " + tmp);
+            }
+            return true;
+        } catch (IOException | PackageManager.NameNotFoundException e) {
+            Slog.e(TAG, "Unable to install boot animation from " + pkgName, e);
+            tmp.delete();
+            return false;
+        }
+    }
+
     // ------------------------------------------------------------------------------------------
     // Package and user changes
 
@@ -798,6 +847,8 @@ public final class ThemeComponentService extends SystemService {
             case MODIFIES_ALARMS:
                 return Objects.equals(state.markers.get(component),
                         getComponentMarker(userId, component));
+            case MODIFIES_BOOT_ANIM:
+                return BOOTANIMATION_FILE.exists();
             default:
                 return true;
         }
