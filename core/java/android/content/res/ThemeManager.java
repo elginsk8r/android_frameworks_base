@@ -32,8 +32,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Client for the theme component service, which applies theme packages on top of the overlay
- * manager.
+ * Client for the theme component service, which applies theme packages (overlays, icon packs,
+ * fonts, wallpapers, sounds and boot animations) on top of the overlay manager.
  *
  * <p>This is unrelated to {@link android.app.ThemeManager}, which manages the dynamic color
  * theme; the two are complementary.

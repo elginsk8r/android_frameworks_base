@@ -19,6 +19,7 @@ package com.android.server.theming;
 
 import static android.content.pm.ThemeUtils.MODIFIES_ALARMS;
 import static android.content.pm.ThemeUtils.MODIFIES_BOOT_ANIM;
+import static android.content.pm.ThemeUtils.MODIFIES_FONTS;
 import static android.content.pm.ThemeUtils.MODIFIES_ICONS;
 import static android.content.pm.ThemeUtils.MODIFIES_LAUNCHER;
 import static android.content.pm.ThemeUtils.MODIFIES_LOCKSCREEN;
@@ -118,10 +119,11 @@ import java.util.function.Predicate;
  *
  * <p>Everything is delegated to existing platform mechanisms where one exists:
  * <ul>
- *     <li>Overlays, status bar and navigation bar are the theme's runtime resource overlays,
- *     toggled through the {@link android.content.om.OverlayManager}. Overlays in categories
- *     owned by SystemUI's theme controller (shapes, icon packs) are applied through
- *     {@link Settings.Secure#THEME_CUSTOMIZATION_OVERLAY_PACKAGES} while it is in charge.</li>
+ *     <li>Overlays, status bar, navigation bar and fonts are the theme's runtime resource
+ *     overlays, toggled through the {@link android.content.om.OverlayManager}. Overlays in
+ *     categories owned by SystemUI's theme controller (fonts, shapes, icon packs) are applied
+ *     through {@link Settings.Secure#THEME_CUSTOMIZATION_OVERLAY_PACKAGES} while it is in
+ *     charge.</li>
  *     <li>App icon packs are turned into one fabricated overlay per app replacing its icon, so
  *     the regular resource stack and launchers pick them up.</li>
  *     <li>Wallpapers go through the {@link WallpaperManager}, sounds through the
@@ -148,7 +150,9 @@ public final class ThemeComponentService extends SystemService {
 
     // Overlay categories that SystemUI's ThemeOverlayController keeps in sync with
     // Settings.Secure.THEME_CUSTOMIZATION_OVERLAY_PACKAGES.
+    private static final String OVERLAY_CATEGORY_FONT = "android.theme.customization.font";
     private static final Set<String> CUSTOMIZATION_CATEGORIES = new ArraySet<>(Arrays.asList(
+            OVERLAY_CATEGORY_FONT,
             "android.theme.customization.adaptive_icon_shape",
             "android.theme.customization.icon_pack.android",
             "android.theme.customization.icon_pack.systemui",
@@ -158,7 +162,7 @@ public final class ThemeComponentService extends SystemService {
     private static final String CUSTOMIZATION_TIMESTAMP = "_applied_timestamp";
 
     private static final List<String> OVERLAY_COMPONENTS = Arrays.asList(
-            MODIFIES_OVERLAYS, MODIFIES_STATUS_BAR, MODIFIES_NAVIGATION_BAR);
+            MODIFIES_OVERLAYS, MODIFIES_STATUS_BAR, MODIFIES_NAVIGATION_BAR, MODIFIES_FONTS);
 
     private static final File THEME_DIR = new File(Environment.getDataSystemDirectory(), "theme");
     private static final File BOOTANIMATION_DIR = new File("/data/misc/bootanim/theme");
@@ -514,6 +518,9 @@ public final class ThemeComponentService extends SystemService {
 
     @NonNull
     private static String getComponent(@NonNull OverlayInfo overlay) {
+        if (OVERLAY_CATEGORY_FONT.equals(overlay.category)) {
+            return MODIFIES_FONTS;
+        }
         if (SYSTEMUI_PACKAGE.equals(overlay.targetPackageName)) {
             return ThemeUtils.OVERLAY_CATEGORY_NAVBAR.equals(overlay.category)
                     ? MODIFIES_NAVIGATION_BAR : MODIFIES_STATUS_BAR;
@@ -527,6 +534,8 @@ public final class ThemeComponentService extends SystemService {
             @NonNull String target) {
         final Map<String, String> components = state.components;
         switch (component) {
+            case MODIFIES_FONTS:
+                return components.get(MODIFIES_FONTS);
             case MODIFIES_NAVIGATION_BAR:
                 return components.containsKey(MODIFIES_NAVIGATION_BAR)
                         ? components.get(MODIFIES_NAVIGATION_BAR)
@@ -1434,6 +1443,7 @@ public final class ThemeComponentService extends SystemService {
             final ThemeConfig.Builder builder = new ThemeConfig.Builder()
                     .defaultOverlay(getApplied(MODIFIES_OVERLAYS, isApplied))
                     .defaultIcon(getApplied(MODIFIES_ICONS, isApplied))
+                    .defaultFont(getApplied(MODIFIES_FONTS, isApplied))
                     .overlay(ThemeConfig.SYSTEMUI_STATUS_BAR_PKG,
                             getApplied(MODIFIES_STATUS_BAR, isApplied))
                     .overlay(ThemeConfig.SYSTEMUI_NAVBAR_PKG,

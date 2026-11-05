@@ -70,6 +70,7 @@ public final class ThemeUtils {
     public static final String MODIFIES_LAUNCHER = "mods_homescreen";
     public static final String MODIFIES_LOCKSCREEN = "mods_lockscreen";
     public static final String MODIFIES_ICONS = "mods_icons";
+    public static final String MODIFIES_FONTS = "mods_fonts";
     public static final String MODIFIES_BOOT_ANIM = "mods_bootanim";
     public static final String MODIFIES_NOTIFICATIONS = "mods_notifications";
     public static final String MODIFIES_ALARMS = "mods_alarms";
@@ -79,9 +80,9 @@ public final class ThemeUtils {
     public static final String MODIFIES_NAVIGATION_BAR = "mods_navigation_bar";
 
     private static final List<String> ALL_COMPONENTS = Collections.unmodifiableList(Arrays.asList(
-            MODIFIES_LAUNCHER, MODIFIES_LOCKSCREEN, MODIFIES_ICONS, MODIFIES_BOOT_ANIM,
-            MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES, MODIFIES_OVERLAYS,
-            MODIFIES_STATUS_BAR, MODIFIES_NAVIGATION_BAR));
+            MODIFIES_LAUNCHER, MODIFIES_LOCKSCREEN, MODIFIES_ICONS, MODIFIES_FONTS,
+            MODIFIES_BOOT_ANIM, MODIFIES_NOTIFICATIONS, MODIFIES_ALARMS, MODIFIES_RINGTONES,
+            MODIFIES_OVERLAYS, MODIFIES_STATUS_BAR, MODIFIES_NAVIGATION_BAR));
 
     // Asset paths inside a theme package
     public static final String WALLPAPER_PATH = "wallpapers";
